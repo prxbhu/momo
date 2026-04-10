@@ -1,0 +1,38 @@
+# Environment
+.env
+
+# Secrets
+secrets/
+
+# Voice samples (user-provided)
+voice_samples/*.wav
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Go
+services/orchestrator/momo-orchestrator
+*.exe
+
+# Docker
+.docker/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Models (large files)
+*.onnx
+*.bin
+*.pt
+*.pth
