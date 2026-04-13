@@ -14,12 +14,15 @@ import sounddevice as sd
 import time
 import base64
 import io
+import json
+import queue
+import threading
 from transcriber import Transcriber
 from audio_utils import VoiceActivityDetector
 
 app = FastAPI()
 ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://orchestrator:3030")
-WAKE_WORD = "hey momo"
+WAKE_WORD = "momo"
 
 transcriber = Transcriber()
 vad = VoiceActivityDetector()
@@ -37,36 +40,78 @@ def play_audio_bytes(audio_data: bytes):
     except Exception as e:
         print(f"[ASR Error] Failed to play audio: {e}")
 
+def audio_player_worker(audio_queue):
+    """Background thread that continuously plays incoming raw PCM chunks."""
+    try:
+        # pocket-tts default is 24000Hz 
+        stream = sd.RawOutputStream(samplerate=24000, channels=1, dtype='int16')
+        stream.start()
+        
+        header_skipped = False
+        buffer = b""
+        
+        while True:
+            chunk = audio_queue.get()
+            if chunk is None:  # to stop thread
+                break
+                
+            buffer += chunk
+            
+            # Strip the 44-byte WAV header so we don't hear a click at the start
+            if not header_skipped:
+                if len(buffer) >= 44:
+                    buffer = buffer[44:]
+                    header_skipped = True
+                else:
+                    continue
+                    
+            if len(buffer) > 0:
+                stream.write(buffer)
+                buffer = b""
+                
+        stream.stop()
+        stream.close()
+    except Exception as e:
+        print(f"[ASR Error] Player thread crashed: {e}")
+
 async def send_to_orchestrator(utterance: str):
     print(f"[ASR] Sending query to orchestrator: '{utterance}'")
     session_id = get_or_create_session()
+    audio_queue = queue.Queue()
+    player_thread = threading.Thread(target=audio_player_worker, args=(audio_queue,))
+    player_thread.start()
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.post(
+            async with client.stream(
+                "POST",
                 f"{ORCHESTRATOR_URL}/api/transcribe",
                 json={"text": utterance, "session_id": session_id},
-                timeout=60.0 # Give Groq/TTS time to process
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                
-                if "response" in data:
-                    print(f"\n🤖 MOMO: {data['response']}\n")
-                
-                # Check if the Go orchestrator sent back base64 encoded audio
-                if "audio" in data and data["audio"]:
-                    print("[ASR] Playing MOMO's response...")
-                    audio_bytes = base64.b64decode(data["audio"])
-                    # Run playback in a separate thread so it doesn't block the async loop
-                    await asyncio.to_thread(play_audio_bytes, audio_bytes)
+                timeout=60.0 # Give LLM time to process
+            ) as response:
+                if response.status_code == 200:
+                    async for line in response.aiter_lines():
+                        if not line:
+                            continue
+                        try:
+                            data = json.loads(line)
+                            
+                            if "response" in data:
+                                print(f"\n🤖 MOMO: {data['response']}\n")
+                            elif "audio_chunk" in data:
+                                audio_bytes = base64.b64decode(data["audio_chunk"])
+                                audio_queue.put(audio_bytes)
+                                
+                        except json.JSONDecodeError:
+                            continue
                 else:
-                    print("[ASR Warning] No 'audio' returned from Orchestrator.")
-            else:
-                print(f"[ASR Error] Orchestrator returned status {response.status_code}")
-                
+                    print(f"[ASR Error] Orchestrator returned status {response.status_code}")
     except httpx.RequestError as e:
          print(f"[ASR Error] Failed to reach orchestrator: {e}")
+    audio_queue.put(None)
+    await asyncio.to_thread(player_thread.join)
+    # finally:
+    #     audio_queue.put(None)
+    #     player_thread.join()
 
 async def listen_loop():
     print(f"[ASR] Listening for wake word '{WAKE_WORD}'...")

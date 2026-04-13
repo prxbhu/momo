@@ -3,7 +3,7 @@ TTS Service - FastAPI App
 Takes text in, streams WAV bytes out.
 """
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 from synthesizer import VoiceSynthesizer
@@ -29,9 +29,13 @@ async def speak(body: SpeakBody):
          raise HTTPException(status_code=400, detail="Text cannot be empty.")
          
     try:
-         print(f"[TTS] Request to synthesize: '{body.text}'")
-         wav_bytes = await synthesizer.synthesize(body.text)
-         return Response(content=wav_bytes, media_type="audio/wav")
+        print(f"[TTS] Request to synthesize: '{body.text}'")
+        #  wav_bytes = await synthesizer.synthesize(body.text)
+        #  return Response(content=wav_bytes, media_type="audio/wav")
+        return StreamingResponse(
+            synthesizer.synthesize_stream(body.text), 
+            media_type="audio/wav"
+        )
     except Exception as e:
          raise HTTPException(status_code=500, detail=str(e))
 
