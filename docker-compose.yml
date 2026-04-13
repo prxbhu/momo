@@ -1,0 +1,156 @@
+version: "3.9"
+
+networks:
+  momo_net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  ollama_data:
+  voice_samples:
+  xtts_models:
+
+services:
+
+  # ─────────────────────────────────────────
+  # ORCHESTRATOR — Go
+  # ─────────────────────────────────────────
+  orchestrator:
+    build:
+      context: ./services/orchestrator
+      dockerfile: Dockerfile
+    ports:
+      - "3030:3030"
+    environment:
+      - PORT=3030
+      - ASR_URL=http://asr-service:8001
+      - TTS_URL=http://tts-service:8002
+      - MCP_URL=http://mcp-server:8000
+      - OLLAMA_URL=http://ollama:11434
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - GROQ_MODEL=llama-3.3-70b-versatile
+      - POSTGRES_URL=postgres://momo:momo@postgres:5432/momo?sslmode=disable
+      - FUNCTION_MODEL=functiongemma
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    depends_on:
+      - postgres
+      - asr-service
+      - tts-service
+      - mcp-server
+      - ollama
+    networks:
+      - momo_net
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────
+  # ASR SERVICE — Python + Moonshine
+  # ─────────────────────────────────────────
+  asr-service:
+    build:
+      context: ./services/asr
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8001"
+    environment:
+      - PORT=8001
+      - ORCHESTRATOR_URL=http://orchestrator:3030
+      - WAKE_WORD=momo
+      - MOONSHINE_MODEL=moonshine/base
+      - VAD_MODEL=silero_vad
+    devices:
+      - /dev/snd:/dev/snd
+    volumes:
+      - voice_samples:/app/voice_samples
+    networks:
+      - momo_net
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────
+  # TTS SERVICE — Python + XTTS-v2
+  # ─────────────────────────────────────────
+  tts-service:
+    build:
+      context: ./services/tts
+      dockerfile: Dockerfile
+    ports:
+      - "8002:8002"
+    environment:
+      - PORT=8002
+      - XTTS_MODEL=tts_models/multilingual/multi-dataset/xtts_v2
+      - VOICE_SAMPLE_DIR=/app/voice_samples
+      - TTS_LANGUAGE=en
+    volumes:
+      - voice_samples:/app/voice_samples
+      - xtts_models:/root/.local/share/tts
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - momo_net
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────
+  # MCP TOOL SERVER — Python + FastMCP
+  # ─────────────────────────────────────────
+  mcp-server:
+    build:
+      context: ./services/mcp
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - PORT=8000
+      - TRANSPORT=sse
+      - SERPER_API_KEY=${SERPER_API_KEY}
+      - OPENWEATHER_API_KEY=${OPENWEATHER_API_KEY}
+      - GOOGLE_CALENDAR_CREDENTIALS=/app/secrets/google_calendar.json
+      - HOME_ASSISTANT_URL=${HOME_ASSISTANT_URL}
+      - HOME_ASSISTANT_TOKEN=${HOME_ASSISTANT_TOKEN}
+      - POSTGRES_URL=postgres://momo:momo@postgres:5432/momo?sslmode=disable
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OLLAMA_URL=http://ollama:11434
+    volumes:
+      - ./secrets:/app/secrets:ro
+    depends_on:
+      - postgres
+      - ollama
+    networks:
+      - momo_net
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────
+  # OLLAMA — FunctionGemma
+  # ─────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_KEEP_ALIVE=24h
+    networks:
+      - momo_net
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────
+  # POSTGRES 16 with pgvector
+  # ─────────────────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg16
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=momo
+      - POSTGRES_PASSWORD=momo
+      - POSTGRES_DB=momo
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql
+    networks:
+      - momo_net
+    restart: unless-stopped
